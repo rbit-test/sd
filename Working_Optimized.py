@@ -3,6 +3,7 @@ import asyncio
 import aiohttp
 import time
 import csv
+import ssl
 from datetime import datetime
 from dotenv import load_dotenv
 import sys
@@ -201,6 +202,37 @@ def safe_token_display(token):
     if not token or len(token) < 8:
         return "****"
     return f"{token[:4]}{'*' * (len(token) - 8)}{token[-4:]}"
+
+def load_ssl_certificate():
+    """Load SSL certificate from current directory. Returns SSL context or None if not found."""
+    cert_path = os.path.join(os.getcwd(), "cert.cer")
+    
+    if not os.path.exists(cert_path):
+        print_error("SSL Certificate not found!")
+        print_error(f"Please save your SSL certificate as 'cert.cer' in the current directory:")
+        print_error(f"Required path: {cert_path}")
+        print_info("\nTo obtain and save your certificate:")
+        print_info("1. Download your organization's SSL certificate")
+        print_info("2. Save it as 'cert.cer' in the current directory")
+        print_info("3. Run the script again")
+        print_warning("\nAlternatively, you can:")
+        print_warning("- Contact your system administrator for the certificate")
+        print_warning("- Check if your GitHub instance requires custom certificates")
+        return None
+    
+    try:
+        # Create SSL context and load certificate
+        ssl_context = ssl.create_default_context(cafile=cert_path)
+        # Verify the certificate file size for basic validation
+        cert_size = os.path.getsize(cert_path)
+        print_success(f"✅ SSL certificate loaded successfully from: {cert_path}")
+        print_info(f"Certificate file size: {cert_size} bytes")
+        return ssl_context
+    except Exception as e:
+        print_error(f"Failed to load SSL certificate: {e}")
+        print_error("Please ensure the certificate file is valid and properly formatted")
+        print_info("Common certificate file formats: .cer, .crt, .pem")
+        return None
 
 def get_user_choice(prompt, valid_choices, allow_multiple=False):
     """Get and validate user choice with enhanced UI."""
@@ -539,15 +571,26 @@ async def main():
         # DS for storing multiple results when calling multiple times due to repo scope filtering
         results = []
         
+        # Load SSL certificate for secure connections
+        print_section_header("Loading SSL Certificate")
+        ssl_context = load_ssl_certificate()
+        if ssl_context is None:
+            print_error("Cannot proceed without SSL certificate. Exiting...")
+            return
+        
         # Create single session for all API calls
         session_headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github.v3.text-match+json"
         }
         
+        # Create connector with SSL context
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        
         async with aiohttp.ClientSession(
             headers=session_headers,
-            timeout=aiohttp.ClientTimeout(total=300)  # 5 minute timeout
+            timeout=aiohttp.ClientTimeout(total=300),  # 5 minute timeout
+            connector=connector
         ) as session:
             if instance == "cloud":
                 print_info(f"Searching across {len(ORGANIZATIONS)} organizations...")
