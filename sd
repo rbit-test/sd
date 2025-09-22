@@ -1,0 +1,440 @@
+import os
+import requests
+import asyncio
+import aiohttp
+import async_timeout
+import time
+import csv
+import base64
+from dotenv import load_dotenv
+"""
+
+Script Function:
+1. Asks user for a search query
+2. Asks user for a file type (e.g., .py, .js)
+3. Asks user for number of results
+4. Asks user to search on prem instance of github or github cloud
+5. Asks if user wants to search within an organization or outside
+6. Searches GitHub code for the given pattern, file type, and organization scope
+7. Print the total occurrences found
+8. Concurrently fetches the raw content of top files and saves lines containing the pattern in a CSV file 
+"""
+OUTPUT_FOLDER = "output"
+DEBUG_FOLDER = "debug"
+"""
+Below is the code for constants and configurations used in the main script.
+"""
+SEARCH_PER_PAGE = 100            # Max items per page for search API
+MAX_SEARCH_RESULTS = 100         # Max search results to fetch
+RETRY_DELAY_INITIAL = 2          # Initial retry delay for secondary rate limits (seconds)
+# Proxies to be used when Searching Outside Organization
+PROXIES = {
+    # HTTP proxy
+    "http": "http://your_http_proxy:port",
+    # HTTPS proxy
+    "https": "http://your_https_proxy:port",
+}
+# Github Search API URL
+API_ENDPOINTS = {
+    "cloud": "https://api.github.com/search/code",
+    "on_prem": "https://api.github.com/search/code" # Change to your on-premise instance URL if different
+}
+
+# Predefined File Types
+# Predefined File Types for GitHub Search API
+FILE_TYPES = {
+    "0"  : "Across All File Types",
+
+    # Programming Languages
+    "1"  : ".py",        # Python
+    "2"  : ".js",        # JavaScript
+    "3"  : ".ts",        # TypeScript
+    "4"  : ".java",      # Java
+    "5"  : ".go",        # Go
+    "6"  : ".rb",        # Ruby
+    "7"  : ".php",       # PHP
+    "8"  : ".cpp",       # C++
+    "9"  : ".c",         # C
+    "10" : ".cs",        # C#
+    "11" : ".swift",     # Swift
+    "12" : ".kt",        # Kotlin
+    "13" : ".rs",        # Rust
+    "14" : ".scala",     # Scala
+    "15" : ".sh",        # Shell / Bash
+    "16" : ".pl",        # Perl
+    "17" : ".lua",       # Lua
+
+    # Markup & Styles
+    "20" : ".html",
+    "21" : ".htm",
+    "22" : ".css",
+    "23" : ".scss",
+    "24" : ".md",        # Markdown
+    "25" : ".rst",       # reStructuredText
+    "26" : ".xml",
+
+    # Data & Config
+    "30" : ".json",
+    "31" : ".yaml",
+    "32" : ".yml",
+    "33" : ".toml",
+    "34" : ".ini",
+    "35" : ".config",
+    "36" : ".conf",
+    "37" : ".properties",
+    "38" : ".env",
+
+    # Build & Package
+    "40" : ".gradle",
+    "41" : ".pom",       # Maven POM
+    "42" : ".lock",      # Lock files (npm, pipenv, etc.)
+    "43" : ".dockerfile",
+    "44" : ".makefile",
+    "45" : ".cmake",
+
+    # Scripts & Misc
+    "50" : ".bat",
+    "51" : ".ps1",       # PowerShell
+    "52" : ".sql",
+    "53" : ".ipynb",     # Jupyter Notebook
+    "54" : ".tex",       # LaTeX
+}
+
+# Organization List
+ORGANIZATIONS = ["ethereum", "Bitbox-Connect", "seopanel"]
+# Load .env file in current directory
+load_dotenv()
+# This function will handle all the required inputs and error handling for inputs
+def ask_required(prompt : str, label : str) -> str:
+    # Keep asking with a custom prompt until a non-empty input is received
+    while True:
+        user_input = input(f"{prompt}: ").strip()
+        if user_input.lower() == 'exit':
+            print("Exit requested. Exiting the program.")
+            raise SystemExit(0)
+        if user_input:
+            return user_input
+        print(f"{label} is a required field. Please provide a valid {label} or type 'exit' to quit.")
+
+# This function will handle all the console input from the user
+def get_user_input():
+    # check for token in the .env file in current directory
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        token = ask_required("Enter your GitHub Personal Access Token", "GitHub Token")
+        # Ask user to save token in env variable for future use
+        save_token = input("Do you want to save this token in an .env file for future use? (y/n): ").strip()
+        if save_token == 'y':
+            with open(".env", "w") as f:
+                f.write(f"GITHUB_TOKEN={token}\n")
+            print("Token saved in env file in current directory.")
+    else:
+        print(f"Using GitHub token from env file. {token[:4]}****{token[-4:]}")
+    pattern = ask_required("Enter the code pattern to search for (e.g., secret_key =)", "Search Pattern")
+    result_limit = ""
+    while not result_limit.isdigit() or int(result_limit) <= 0:
+        result_limit = ask_required("Enter the number of results to fetch", "Number of Results")
+    result_limit = int(result_limit)
+    # File Type Selection input 1,2,17 etc
+    print("Enter number separated by comma for file types to search within:")
+    for key, value in FILE_TYPES.items():
+        print(f"{key}: {value}")
+    file_type_choice = ""
+    valid_choices = set(FILE_TYPES.keys())
+    while True:
+        file_type_choice = ask_required("Your choice (e.g., 1,3,5 or 0 for all types)", "File Type Choice")
+        choices = [choice.strip() for choice in file_type_choice.split(",")]
+        if all(choice in valid_choices for choice in choices):
+            break
+        print("Invalid choice(s). Please select from the provided options.")
+    if "0" in choices:
+        file_type = ""  # Search across all file types
+    else:
+        # remove duplicates and join with space
+        file_type = " ".join(set(FILE_TYPES[choice] for choice in choices))
+    # Enter custom extensions
+    custom_ext = input("Enter any custom file extensions to include (comma-separated, e.g., .custom,.ext) or press Enter to skip: ").strip()
+    if custom_ext:
+        # Normalize custom extensions by stripping leading '.'
+        custom_exts = [ext.strip().lstrip('.') for ext in custom_ext.split(",") if ext.strip().startswith(".")]
+        if custom_exts:
+            if file_type:
+                file_type += " " + " ".join(custom_exts)
+            else:
+                file_type = " ".join(custom_exts)
+    return token, pattern, result_limit, file_type
+# function to handle github instance selection and organization scope
+def get_github_instance():
+    # GitHub Instance Selection
+    print("Select GitHub instance to search:")
+    print("1. GitHub Cloud (https://github.com)")
+    print("2. GitHub On-Premise Instance")
+    instance_choice = ""
+    while instance_choice not in ['1', '2']:
+        instance_choice = input("Enter 1 for GitHub Cloud or 2 for GitHub On-Premise: ").strip()
+    github_instance = "cloud" if instance_choice == '1' else "on_prem"
+
+    # if  cloud is selected then tell user that search will be performed within org list
+    if github_instance == "cloud":
+        print(f"Note: The search will be performed within all the predefined organization list: {', '.join(ORGANIZATIONS)}")
+        repo_scope = "2"  # default to all repos including user repos
+    # if on prem is selected then tell user that Searches will be performed on all repositories
+    else:
+        # ask user if for On-Prem instance they want to target only org repos or org+user repos
+        repo_scope = ""
+        while repo_scope not in ['1', '2']:
+            repo_scope = input("For On-Prem instance, do you want to search within (1) Organization Repositories only or (2) All Repositories including User Repositories? Enter 1 or 2: ").strip()
+        if repo_scope == '1':
+            print(f"Note: The search will be performed within all the organizations of your company.")
+        else: print("Note: The search will be performed across all repositories including user repositories of your company.")
+    return github_instance, repo_scope
+
+
+    
+# Build the search query with exact matching
+def build_search_query(pattern: str, file_type: str = None) -> str:
+    """
+    Build a GitHub code search query with exact matching.
+    
+    Args:
+        pattern (str): The search string (e.g., 'secret =', 'password.equals(').
+        file_type (str, optional): Space-separated list of file extensions (e.g., 'py js java').
+
+    Returns:
+        str: The full GitHub search query string.
+    """
+    # Wrap the pattern in quotes for exact match
+    query = f"\"{pattern}\" in:file"
+
+    if file_type:
+        # Add multiple extension filters (no OR/parentheses in REST API)
+        types = file_type.split()
+        type_query = " ".join(f"extension:{t.lstrip('.')}" for t in types)
+        query += f" {type_query}"
+
+    return query
+
+
+
+# Github Search
+async def search_github_code(session, api_url, query, max_results=MAX_SEARCH_RESULTS, repo_scope=None):
+    """Search GitHub code API and return a list of file objects."""
+    all_files = []
+    page = 1
+    while len(all_files) < max_results:
+        params = {
+            'q': query,
+            'per_page': min(SEARCH_PER_PAGE, max_results - len(all_files)),
+            'page': page
+        }
+        async with session.get(api_url, params=params) as resp:
+            if resp.status == 403:  # changed from resp.status_code
+                reset = int(resp.headers.get("X-RateLimit-Reset", time.time() + 60))
+                wait = max(reset - int(time.time()), RETRY_DELAY_INITIAL)
+                print(f"Search API rate limit hit, waiting {wait}s")
+                await asyncio.sleep(wait)
+                continue
+            resp.raise_for_status()
+            # save response in a json file for debugging
+            # with open(f"debug_response_page_{page}.json", "w", encoding="utf-8") as f:
+            #     f.write(await resp.text())
+            data = await resp.json()  # make sure to await
+            items = data.get('items', [])
+            if not items:
+                break
+            # If repo_scope is '1', only add to list if  repository.owner.type is 'Organization' else append all
+            if repo_scope == '1':
+                org_items = [item for item in items if item.get("repository", {}).get("owner", {}).get("type") == "Organization"]
+                all_files.extend(org_items)
+            else:
+                all_files.extend(items)
+            if len(items) < params['per_page']:
+                break
+            page += 1
+    return all_files, data.get('total_count', 0)
+
+
+# Main async flow
+async def main():
+    # Step 1: Get user inputs
+    # check if output folder exists if not create it
+    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+    # check if debug folder exists if not create it
+    # os.makedirs(DEBUG_FOLDER, exist_ok=True)
+    token, pattern, max_results, file_type = get_user_input()
+    instance, repo_scope = get_github_instance()
+    query = build_search_query(pattern, file_type)
+    api_url = API_ENDPOINTS[instance]
+
+    print(f"🔍 Searching for '{pattern}' in '{file_type or 'All'}' files...")
+    # file_name is pattern_name without spaces and special chars + timestamp
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    safe_pattern = "".join(c if c.isalnum() else "_" for c in pattern)[:20]
+    file_name = f"{safe_pattern}_{instance}_{timestamp}"
+    # create folder inside output folder with safe_pattern name
+    pattern_folder = os.path.join(OUTPUT_FOLDER, file_name)
+    os.makedirs(pattern_folder, exist_ok=True)
+    # DS for storing multiple results when calling multiple times due to repo scope filtering
+    results = []
+    if instance == "cloud":
+        # perform search for each organization and aggregate results
+        for org in ORGANIZATIONS:
+            org_query = f"{query} org:{org}"
+            print(f"Searching in organization: {org}")
+            async with aiohttp.ClientSession(headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github.v3.text-match+json"
+            }) as session:
+                org_results, total_count = await search_github_code(
+                    session, api_url, org_query, max_results, repo_scope
+                )
+                results.extend(org_results)
+                # Append total_count from each org to Search_Summary.txt in pattern_folder
+                # check if Search_Summary.txt exists if yes then append else create new
+                summary_file = os.path.join(pattern_folder, "Search_Summary.txt")
+                try:
+                    with open(summary_file, "a", encoding="utf-8") as f:
+                        f.write(f"Organization: {org}, Occurrences Found: {total_count}\n")
+                    print(f"✅ Organization: {org} Occurrences Found: {total_count} appended to search summary")
+                except Exception as e:
+                    print(f"❌ Error appending occurrences for {org} to search summary: {e}")
+        # write other details to Search_Summary.txt
+        try:
+            with open(summary_file, "a", encoding="utf-8") as f:
+                f.write(f"Search Pattern: {pattern}\n")
+                f.write(f"File Types: {file_type or 'All'}\n")
+                f.write(f"GitHub Instance: {instance} ({'GitHub Cloud' if instance == 'cloud' else 'GitHub On-Premise'})\n")
+                scope_desc = "Organization Repositories only"
+                f.write(f"Repository Scope: {scope_desc}\n")
+            print(f"✅ Search summary saved to {summary_file}")
+        except Exception as e:
+            print(f"❌ Error saving search summary: {e}")
+    else:
+        # On-Prem instance, perform single search with or without repo scope filtering
+        async with aiohttp.ClientSession(headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.v3.text-match+json"
+        }) as session:
+            results, total_count = await search_github_code(
+                session, api_url, query, max_results, repo_scope
+            )
+        print(f"Total occurrences of '{pattern}' across GitHub code: {total_count}")
+        # create a Search Summary.txt with pattern, file types selected, instance type, repo scope and total_count and save in pattern_folder
+        summary_file = os.path.join(pattern_folder, "Search_Summary.txt")
+        try:
+            with open(summary_file, "w", encoding="utf-8") as f:
+                f.write(f"Search Pattern: {pattern}\n")
+                f.write(f"File Types: {file_type or 'All'}\n")
+                f.write(f"GitHub Instance: {instance} ({'GitHub Cloud' if instance == 'cloud' else 'GitHub On-Premise'})\n")
+                scope_desc = "Organization Repositories only" if repo_scope == '1' else "All Repositories including User Repositories"
+                f.write(f"Repository Scope: {scope_desc}\n")
+                # get "total_count" from results response it is given by github api {{"total_count": 29248,"incomplete_results": false,}
+                total_count = total_count
+                f.write(f"Total Occurrences Found: {total_count}\n")
+            print(f"✅ Search summary saved to {summary_file}")
+        except Exception as e:
+            print(f"❌ Error saving search summary: {e}")
+    # Step 4: Define columns including fragments from text_matches
+    gh_code_search_columns = [
+        "html_url",
+        "name",                   # File name
+        "path",                   # File path
+        "repository.fork",        # Whether repo is a fork
+        "repository.html_url",    # Repository URL
+        "repository.name",        # Repository name
+        "repository.owner.type",  # Owner type (User/Organization)
+        "repository.owner.login",
+        "fragment"                # Code snippet fragment
+    ]
+
+    # Step 5: Extract fragments into each item for CSV
+    for item in results:
+        # Join all fragments if multiple text_matches exist
+        fragments = []
+        for tm in item.get("text_matches", []):
+            fragment_text = tm.get("fragment")
+            if fragment_text:
+                fragments.append(fragment_text.replace("\r", "").strip())
+        item["fragment"] = "\n---\n".join(fragments)  # separate multiple matches by --- 
+    fragments_file = os.path.join(pattern_folder, f"{file_name}_fragments.csv")
+    pattern_lines_file = os.path.join(pattern_folder, f"{file_name}_pattern_lines.csv")
+    # Step 6: Save results to CSV (robust)
+    save_results_to_csv(results, gh_code_search_columns, fragments_file)
+    print(f"🔍 Search complete. File saved as {fragments_file}")
+    # Step 7: Filter fragments by pattern and save to new CSV (robust)
+    filter_fragments_by_pattern(fragments_file, pattern_lines_file, pattern)
+
+
+def extract_pattern_lines_from_fragment(fragment, pattern):
+    """Extract lines containing the pattern from a code fragment."""
+    matching_lines = []
+    # write best way to extract lines containing the pattern in any case (upper/lower/mixed)
+    for line in fragment.splitlines():
+        if pattern.lower() in line.lower():
+            matching_lines.append(line.strip())
+    return matching_lines
+
+# load the fragments csv and create a new csv using save_results_to_csv() only with lines containing the pattern
+def filter_fragments_by_pattern(input_file, output_file, pattern):
+    try:
+        with open(input_file, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames if reader.fieldnames else []
+            output_rows = []
+            for row in reader:
+                fragment = row.get("fragment", "")
+                for line in extract_pattern_lines_from_fragment(fragment, pattern):
+                    # Copy all columns from input, add matching_line
+                    new_row = [row.get(col, "") for col in fieldnames] + [line]
+                    output_rows.append(new_row)
+    except Exception as e:
+        print(f"❌ Error reading fragments file: {e}")
+        fieldnames = []
+        output_rows = []
+    # Always attempt to save output file, even if no matches
+    try:
+        with open(output_file, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(fieldnames + ["matching_line"])
+            writer.writerows(output_rows)
+        print(f"✅ Filtered lines containing '{pattern}' saved to {output_file}")
+    except Exception as e:
+        print(f"❌ Error saving filtered lines: {e}")
+
+def save_results_to_csv(results, columns, filename="search_results.csv"):
+    """Save results to CSV with dynamic columns including nested keys.
+       Handles errors gracefully (file in use, missing directory, etc.).
+    """
+
+    def get_nested_value(data, path):
+        keys = path.split(".")
+        for key in keys:
+            if isinstance(data, dict):
+                data = data.get(key)
+            else:
+                return None
+        return data
+
+    # Try to save file, always attempt to write, handle errors gracefully
+    try:
+        dir_name = os.path.dirname(filename)
+        if dir_name and not os.path.exists(dir_name):
+            os.makedirs(dir_name, exist_ok=True)
+        with open(filename, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(columns)
+            for item in results:
+                row = [get_nested_value(item, col) for col in columns]
+                writer.writerow(row)
+        print(f"✅ Results saved successfully to {filename}")
+    except Exception as e:
+        print(f"❌ Error saving results to {filename}: {e}")
+
+if __name__ == "__main__":
+    # asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nProcess interrupted by user. Exiting...")
+    except Exception as e:
+        print(f"❌ Process interrupted. Exiting... {e}")
