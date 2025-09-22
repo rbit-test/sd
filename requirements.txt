@@ -1,0 +1,27 @@
+# GitHub Search Automation Tool - Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# HTTP client for async operations
+aiohttp>=3.8.0
+
+# Environment variable management
+python-dotenv>=0.19.0
+
+
+# Pre-requisites:
+# - Python 3.8 or higher
+# - pip (Python package installer)
+# - Any Terminal or Command Prompt
+
+# Installation Instructions:
+# 1. Open Script Directory In VSCode
+# 2. Open Terminal in VSCode make sure directory is same as this file
+# 3. Run: python -m venv venv (Recommended - creates a virtual environment)
+# 4 . Activate the virtual environment:
+#   - Windows: .\venv\Scripts\activate
+#   - macOS/Linux: source venv/bin/activate
+# 5. Run: pip install -r requirements.txt
+
+# SSL Certificate Requirements:
+# - Save your SSL certificate as 'cert.cer' in the script directory
+# - See SSL_Certificate_Setup.md for detailed instructions
