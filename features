@@ -1,0 +1,16 @@
+Features of Github Search Automation Script:
+
+1. Interactive user prompts for search query, file type, result limit, and GitHub instance selection.
+2. Supports both GitHub Cloud and On-Premise instances.
+3. Organization scope selection for targeted searches.
+4. Searches GitHub code for a given pattern, file type, and organization scope using the official API.
+5. Handles multiple organizations and aggregates results for cloud searches.
+6. Supports custom file extensions and multiple file types.
+7. Handles large result sets with date range partitioning for on-premise searches.
+8. Extracts code fragments matching the search pattern from results.
+9. Saves search results and matching lines to organized CSV files in output folders.
+10. Generates a detailed search summary including pattern, file types, instance, scope, and total occurrences found.
+11. Robust error handling for file operations and API requests.
+12. Uses environment variables for secure token management.
+13. Output and debug folders for organized result storage.
+14. Extensible for further automation and reporting.
